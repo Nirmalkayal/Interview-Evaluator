@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import nltk
 from pydub import AudioSegment
 import cv2
@@ -9,9 +8,9 @@ from deepface import DeepFace
 from collections import Counter
 from sentence_transformers import SentenceTransformer, util
 import whisper
-# --- NEW: IMPORTS FOR VOCAL ANALYSIS ---
 import librosa
 import numpy as np
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 # --- LOAD ALL AI MODELS ON STARTUP ---
 print("Loading AI models, this may take a moment...")
@@ -36,35 +35,57 @@ FILLER_WORDS = [
     "basically", "actually", "i mean", "right"
 ]
 
-# --- NEW: VOCAL ANALYSIS FUNCTION ---
+# --- NEW: DYNAMIC FEEDBACK GENERATOR ---
+def generate_dynamic_feedback(scores):
+    feedback_tips = []
+
+    # 1. Feedback on Speaking Pace
+    pace = scores['speaking_pace_wpm']
+    if pace < 130:
+        feedback_tips.append({"type": "improvement", "tip": f"Your speaking pace of {pace} WPM is a bit slow. Try to speak more fluidly."})
+    elif pace > 170:
+        feedback_tips.append({"type": "improvement", "tip": f"Your speaking pace of {pace} WPM is quite fast. Remember to pause to let your key points sink in."})
+    else:
+        feedback_tips.append({"type": "positive", "tip": f"Your speaking pace of {pace} WPM is perfect. It's clear and easy for the listener to follow."})
+
+    # 2. Feedback on Clarity (Filler Words)
+    fillers = scores['filler_word_count']
+    if fillers == 0:
+        feedback_tips.append({"type": "positive", "tip": "Excellent clarity! You avoided using any filler words, which makes your speech sound confident and polished."})
+    elif fillers > 3:
+        feedback_tips.append({"type": "improvement", "tip": f"You used {fillers} filler words. To improve clarity, try pausing silently instead of using words like 'um' or 'like'."})
+
+    # 3. Feedback on Engagement (Vocal Variety)
+    engagement = scores['engagement_score']
+    if engagement < 40:
+        feedback_tips.append({"type": "improvement", "tip": "Your vocal tone was a bit monotone. Try to vary your pitch and energy to sound more engaging and dynamic."})
+    else:
+        feedback_tips.append({"type": "positive", "tip": "Great vocal engagement! Your varied tone helps keep the listener interested and conveys enthusiasm."})
+
+    # 4. Feedback on Relevance
+    relevance = scores['relevance_score']
+    if relevance < 60:
+        feedback_tips.append({"type": "improvement", "tip": "A good start, but try to connect your answer more directly to the keywords from the job description to show you're a strong fit."})
+    else:
+        feedback_tips.append({"type": "positive", "tip": "Fantastic answer! You did a great job of aligning your experience with the key skills for the role."})
+
+    return feedback_tips
+# ---------------------------------------
+
+# (All other analysis functions like analyze_vocal_characteristics, calculate_relevance_score, etc. remain the same)
 def analyze_vocal_characteristics(audio_path):
     try:
         y, sr = librosa.load(audio_path)
-        
-        # 1. Calculate Speaking Pace (WPM)
         duration_seconds = librosa.get_duration(y=y, sr=sr)
-        # We'll get the word count from the transcription later
-        
-        # 2. Calculate Pitch Variation (Monotony Detection)
         pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
-        # Get the pitches for frames with high confidence
         confident_pitches = pitches[magnitudes > np.median(magnitudes)]
-        if len(confident_pitches) > 0:
-            pitch_variation = np.std(confident_pitches[confident_pitches > 0])
-        else:
-            pitch_variation = 0
-
-        return {
-            "duration_seconds": duration_seconds,
-            "pitch_variation": pitch_variation
-        }
+        pitch_variation = np.std(confident_pitches[confident_pitches > 0]) if len(confident_pitches) > 0 else 0
+        return {"duration_seconds": duration_seconds, "pitch_variation": pitch_variation}
     except Exception as e:
         print(f"Error in vocal analysis: {e}")
-        return { "duration_seconds": 0, "pitch_variation": 0 }
-# ------------------------------------
+        return {"duration_seconds": 0, "pitch_variation": 0}
 
 def calculate_relevance_score(text, keywords):
-    # This function is unchanged
     if not keywords or not text or text.startswith("Could not understand"): return 0
     try:
         embedding_text = relevance_model.encode(text, convert_to_tensor=True)
@@ -75,14 +96,11 @@ def calculate_relevance_score(text, keywords):
     except: return 0
 
 def count_filler_words(text):
-    # This function is unchanged
     words = text.lower().split()
     return sum(1 for word in words if word in FILLER_WORDS)
 
 def analyze_facial_expressions(video_path):
-    # This function is unchanged
     try:
-        # ... (code for facial analysis is the same)
         emotions = []
         cap = cv2.VideoCapture(video_path)
         frame_rate = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -100,14 +118,11 @@ def analyze_facial_expressions(video_path):
         cap.release()
         if not emotions: return "Neutral"
         return Counter(emotions).most_common(1)[0][0].capitalize()
-    except:
-        return "Neutral"
+    except: return "Neutral"
 
-# --- UPDATED: SCORING ENGINE ---
 def calculate_scores(text, facial_emotion, sentiment_score, keywords, vocal_analysis):
     filler_count = count_filler_words(text)
     clarity_score = max(0, 100 - (filler_count * 5))
-    
     confidence_score = 60
     if facial_emotion.lower() == 'happy': confidence_score += 20
     elif facial_emotion.lower() == 'neutral': confidence_score += 10
@@ -115,27 +130,11 @@ def calculate_scores(text, facial_emotion, sentiment_score, keywords, vocal_anal
     if sentiment_score > 0.5: confidence_score += 15
     elif sentiment_score < -0.4: confidence_score -= 20
     confidence_score = max(0, min(100, confidence_score))
-    
     relevance_score = calculate_relevance_score(text, keywords)
-    
-    # NEW: Calculate Speaking Pace
     word_count = len(text.split())
-    speaking_pace_wpm = 0
-    if vocal_analysis['duration_seconds'] > 0:
-        speaking_pace_wpm = int((word_count / vocal_analysis['duration_seconds']) * 60)
-
-    # NEW: Calculate Engagement Score based on pitch
-    # (This is a simple model; a higher std dev suggests more variation)
+    speaking_pace_wpm = int((word_count / vocal_analysis['duration_seconds']) * 60) if vocal_analysis['duration_seconds'] > 0 else 0
     engagement_score = min(100, int(vocal_analysis['pitch_variation'] * 10))
-    
-    return {
-        "confidence_score": int(confidence_score),
-        "clarity_score": int(clarity_score),
-        "relevance_score": int(relevance_score),
-        "engagement_score": int(engagement_score),
-        "filler_word_count": filler_count,
-        "speaking_pace_wpm": speaking_pace_wpm
-    }
+    return {"confidence_score": confidence_score, "clarity_score": clarity_score, "relevance_score": relevance_score, "engagement_score": engagement_score, "filler_word_count": filler_count, "speaking_pace_wpm": speaking_pace_wpm}
 
 @app.route('/evaluate', methods=['POST'])
 def evaluate_interview():
@@ -145,7 +144,6 @@ def evaluate_interview():
     keywords = request.form.get('keywords', '')
     audio_file = request.files['audio']
     video_file = request.files['video']
-
     original_audio_path = os.path.join("uploads", "interview_audio.webm")
     video_path = os.path.join("uploads", "interview_video.webm")
     audio_file.save(original_audio_path)
@@ -158,35 +156,27 @@ def evaluate_interview():
     except Exception as e:
         return jsonify({"error": f"Failed to process audio file: {e}"}), 500
 
-    # --- ANALYSIS PIPELINE ---
-    # 1. High-Accuracy Transcription with Whisper
+    # Analysis Pipeline
     try:
         result = whisper_model.transcribe(wav_path, fp16=False)
         text = result.get('text', "Transcription failed.")
     except Exception as e:
-        text = f"Could not understand the audio due to an error: {e}"
+        text = f"Could not understand the audio: {e}"
 
-    # 2. NEW: Vocal Characteristics Analysis
     vocal_analysis_results = analyze_vocal_characteristics(wav_path)
-
-    # 3. Analyze Sentiment & Facial Expressions
     sentiment_score = SentimentIntensityAnalyzer().polarity_scores(text)['compound']
     facial_emotion = analyze_facial_expressions(video_path)
-    
-    # 4. Get All Scores from the Engine
     scores = calculate_scores(text, facial_emotion, sentiment_score, keywords, vocal_analysis_results)
     
-    # 5. Build Final Report
+    # --- GET DYNAMIC FEEDBACK ---
+    feedback_tips = generate_dynamic_feedback(scores)
+
+    # Build Final Report
     report = {
         "transcription": text,
         "facial_emotion": facial_emotion,
-        "confidence_score": scores['confidence_score'],
-        "clarity_score": scores['clarity_score'],
-        "relevance_score": scores['relevance_score'],
-        "engagement_score": scores['engagement_score'],
-        "filler_word_count": scores['filler_word_count'],
-        "speaking_pace_wpm": scores['speaking_pace_wpm'],
-        "feedback": "Vocal analysis complete."
+        "scores": scores, # Send all scores nested in one object
+        "feedback_tips": feedback_tips # Send the list of tips
     }
 
     return jsonify(report)
